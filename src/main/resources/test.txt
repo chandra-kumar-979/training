@@ -1,0 +1,31 @@
+Chandra Kumar Kuruba chandra.k5680@gmail.com +91 7799225680 https://www.linkedin.com/in/chandra-kumar-b6aa881bb/
+
+Professional Summary
+Self-motivated backend developer with nearly 4 years of experience specializing in Java Spring Boot microservices and Angular for frontend development. Proficient in web application design, RESTful services, and database management with Oracle SQL and MySQL. Experienced in Agile SCRUM methodologies, unit testing with JUnit and Mockito, and skilled in version control using Git. Strong communicator and team player with a commitment to continuous learning and technical excellence.
+
+Technical Skills
+Languages: Java, TypeScript, HTML, CSS
+Frameworks: Spring Boot, Angular, Bootstrap, Kafka, Messaging Queue
+Databases: Oracle SQL, MySQL
+Tools & Technologies: Git, GitLab, Jenkins, Postman, SonarQube
+Methodologies: Agile, SCRUM
+Testing: JUnit, Mockito,
+
+Professional Experience
+Associate Programmer Analyst Boeing India Pvt Ltd — Bangalore - KA June-2022  – Present
+Conduct in-depth analysis of user stories and break down tasks into manageable sprints.
+Review partially implemented code to identify necessary changes and enhancements.
+Design and create REST endpoints based on project requirements.
+Analyze existing codebase to develop comprehensive documentation outlining functional impacts and testing scope for peer review.
+Implement changes based on feedback from leads while concurrently working on the coding aspects.
+Write business logic and ORM queries for efficient data retrieval and storage.
+Perform thorough API testing using Postman to validate endpoints across various user scenarios.
+Develop responsive web UI components using HTML, CSS, Bootstrap, and Angular.
+Wrote JUnit test cases for service and repository methods, covering both valid and invalid scenarios.
+Implemented reactive forms in Angular with client-side validations for enhanced user experience.
+Managed source code in GitLab, ensuring synchronization among team members regarding project progress.
+Conducted code reviews following coding standards and utilized SonarQube for quality assurance.
+Set up a Jenkins pipeline for seamless deployment in GitLab for both frontend and backend applications.
+
+Education
+Bachelor Of Technology Computer Science And Engineering MB University — Tiruathi- AP 2020
