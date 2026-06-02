@@ -32,7 +32,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: eu-central-1
       - name: Set up terraform
         uses: hashicorp/setup-terraform@v3
       - name: Terraform init
@@ -40,7 +40,7 @@ jobs:
         run: terraform init
       - name: Terraform apply
         working-directory: ./terraform
-        run: terraform apply -var-file="dev.vartf" -auto-approve
+        run: terraform apply -var-file="dev.tfvars" -auto-approve
       # Runs a single command using the runners shell
       - name: Build
         run: mvn clean install

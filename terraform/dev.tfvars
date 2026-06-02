@@ -1,0 +1,5 @@
+bucket_name = "test-bucket-ck"
+region = "eu-central-1"
+environment = "dev"
+cidr_block = "10.0.0.0/21"
+subnet_cidr_block = "10.0.1.0/28"
