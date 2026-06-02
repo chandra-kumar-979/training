@@ -36,9 +36,11 @@ jobs:
       - name: Set up terraform
         uses: hashicorp/setup-terraform@v3
       - name: Terraform init
+        working-directory: ./terraform
         run: terraform init
       - name: Terraform apply
-        run: terraform apply -var-file='dev.vartf"
+        working-directory: ./terraform
+        run: terraform apply -var-file="dev.vartf"
       # Runs a single command using the runners shell
       - name: Build
         run: mvn clean install
