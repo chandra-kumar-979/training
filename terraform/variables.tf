@@ -9,3 +9,18 @@ variable "environment" {
   type        = string
   default     = "dev"
 }
+
+variable "bucket_name" {
+  description = "S3 bucket name used by terraform (if any)"
+  type        = string
+}
+
+variable "cidr_block" {
+  description = "VPC CIDR block"
+  type        = string
+}
+
+variable "subnet_cidr_block" {
+  description = "Subnet CIDR block"
+  type        = string
+}

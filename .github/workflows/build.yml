@@ -104,83 +104,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to Docker Hub (if credentials provided)
-        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
-        uses: docker/login-action@v2
-        with:
-          registry: docker.io
-          username: ${{ env.DOCKERHUB_USERNAME }}
-          password: ${{ env.DOCKERHUB_TOKEN }}
-
-      - name: Docker Hub login diagnostic
-        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
-        run: |
-          echo "Docker Hub login attempted for user: ${{ env.DOCKERHUB_USERNAME }}"
-          docker info | sed -n '1,200p'
-
-      - name: Validate Docker Hub credentials and scopes (pull,push)
-        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
-        env:
-          DOCKERHUB_USERNAME: ${{ env.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ env.DOCKERHUB_TOKEN }}
-        run: |
-          set -e
-          REPO="${DOCKERHUB_USERNAME}/rag-chatbot-app"
-          AUTH_URL="https://auth.docker.io/token?service=registry.docker.io&scope=repository:${REPO}:pull,push"
-          echo "Checking Docker Hub token for repository scope: ${REPO}"
-          HTTP_CODE=$(curl -s -u "${DOCKERHUB_USERNAME}:${DOCKERHUB_TOKEN}" -o /tmp/docker_token_resp -w "%{http_code}" "${AUTH_URL}") || true
-          if [ "${HTTP_CODE}" != "200" ]; then
-            echo "::error::Docker Hub credentials validation failed (HTTP ${HTTP_CODE}). The provided token/user may be invalid or lack pull/push scope for ${REPO}.";
-            echo "Response (first 200 chars):";
-            head -c 200 /tmp/docker_token_resp || true
-            echo "\n\nCommon fixes:\n - Use a Docker Hub Access Token (not your account password).\n - Generate a token in Docker Hub (Account Settings → Security → New Access Token) and give it appropriate permissions.\n - Store the token in the repo secret DOCKERHUB_TOKEN and the username in DOCKERHUB_USERNAME.\n";
-            exit 1;
-          else
-            echo "Docker Hub token validated for ${REPO}.";
-          fi
-
-      - name: Login to GitHub Container Registry (use PAT if provided)
-        if: ${{ env.GHCR_PAT != '' }}
-        uses: docker/login-action@v2
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ env.GHCR_PAT }}
-
-      - name: Login to GitHub Container Registry (use GITHUB_TOKEN)
-        if: ${{ env.GHCR_PAT == '' }}
-        uses: docker/login-action@v2
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push to registries (GHCR + ECR)
+      - name: Build and push to Amazon ECR
         uses: docker/build-push-action@v4
         with:
           context: .
           file: docker/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/rag-chatbot-app:latest
-            ghcr.io/${{ github.repository_owner }}/rag-chatbot-app:${{ github.sha }}
             ${{ steps.aws-account.outputs.aws_account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/rag-chatbot-app:latest
             ${{ steps.aws-account.outputs.aws_account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/rag-chatbot-app:${{ github.sha }}
-
-      - name: Login to Docker Hub
-        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
-        uses: docker/login-action@v2
-        with:
-          username: ${{ env.DOCKERHUB_USERNAME }}
-          password: ${{ env.DOCKERHUB_TOKEN }}
-
-      - name: Build and push to Docker Hub
-        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
-        uses: docker/build-push-action@v4
-        with:
-          context: .
-          file: docker/Dockerfile
-          push: true
-          tags: |
-            docker.io/${{ env.DOCKERHUB_USERNAME }}/rag-chatbot-app:latest
-            docker.io/${{ env.DOCKERHUB_USERNAME }}/rag-chatbot-app:${{ github.sha }}

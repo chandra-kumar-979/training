@@ -40,6 +40,14 @@ jobs:
             exit 1;
           fi
 
+      - name: Use existing Terraform state if present (do not archive)
+        run: |
+          if [ -f terraform/terraform.tfstate ]; then
+            echo "Found existing local Terraform state at terraform/terraform.tfstate. Will use and update it.";
+          else
+            echo "No local terraform.tfstate found; a new state will be created by Terraform.";
+          fi
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -66,8 +74,46 @@ jobs:
 
       - name: Terraform init
         working-directory: ./terraform
-        run: terraform init
+        run: terraform init -input=false
 
-      - name: Terraform apply
+      - name: Show terraform directory and varfile (diagnostic)
         working-directory: ./terraform
-        run: terraform apply -var-file="dev.tfvars" -auto-approve
+        run: |
+          echo "PWD: $(pwd)"
+          echo "Listing terraform dir:"; ls -la
+          echo "--- dev.tfvars content ---"; cat dev.tfvars || echo "dev.tfvars not found"
+
+      - name: Import existing ECR repository into Terraform state if present
+        working-directory: ./terraform
+        run: |
+          REPO_NAME="rag-chatbot-app"
+          # Check if the repo exists in ECR
+          if aws ecr describe-repositories --repository-names "$REPO_NAME" >/dev/null 2>&1; then
+            echo "ECR repository $REPO_NAME exists."
+            # Check if Terraform already manages it; handle case when state is empty
+            if terraform state list >/dev/null 2>&1; then
+              if terraform state list | grep -q "^aws_ecr_repository.app$"; then
+                echo "Terraform already manages aws_ecr_repository.app"
+              else
+                echo "Importing existing ECR repository into Terraform state..."
+                terraform import -input=false aws_ecr_repository.app $REPO_NAME || echo "terraform import returned non-zero (continuing)"
+              fi
+            else
+              echo "Terraform state is empty or unavailable; proceeding to import existing repository into new state"
+              terraform import -input=false aws_ecr_repository.app $REPO_NAME || echo "terraform import returned non-zero (continuing)"
+            fi
+          else
+            echo "ECR repository $REPO_NAME does not exist yet - Terraform will create it."
+          fi
+
+      - name: Terraform refresh (update local state from provider)
+        working-directory: ./terraform
+        run: terraform refresh -input=false || true
+
+      - name: Terraform plan
+        working-directory: ./terraform
+        run: terraform plan -var-file="${GITHUB_WORKSPACE}/terraform/dev.tfvars" -out=plan.tfplan -input=false
+
+      - name: Terraform apply (apply planned changes)
+        working-directory: ./terraform
+        run: terraform apply -input=false plan.tfplan
