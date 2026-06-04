@@ -1,9 +1,4 @@
-variable ami_id {
-  description = "The AMI ID to use for the EC2 instance"
-  type        = string
-}
+// Archived: original ec2/variables.tf moved to terraform/archive/ec2_variables.tf
+// See terraform/archive/ for the original variables.
 
-variable subnet_id {
-  description = "The ID of the subnet to launch the EC2 instance in"
-  type        = string
-}
+// (This file intentionally left as a placeholder.)

@@ -1,15 +1,4 @@
-resource "aws_s3_bucket" "test-bucket-ck" {
-  bucket = var.bucket_name
-  tags = {
-    region      = var.region
-    Environment = var.environment
-  }
-}
+// Archived: original s3/main.tf moved to terraform/archive/s3_main.tf
+// See terraform/archive/ for the original S3 module.
 
-output "bucket_id" {
-  value = aws_s3_bucket.test-bucket-ck.id
-}
-
-output "tags" {
-  value = aws_s3_bucket.test-bucket-ck.tags
-}
+// (This file intentionally left as a placeholder.)

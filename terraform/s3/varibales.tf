@@ -1,17 +1,4 @@
-variable "bucket_name" {
-  description = "Bucket Name"
-  type = string
-  default = "test-bucket-name-ck"
-}
+// Archived: original s3/varibales.tf moved to terraform/archive/s3_variables.tf
+// See terraform/archive/ for the original variables.
 
-variable "environment" {
-  description = "Enter environment"
-  type = string
-  default = "dev"
-}
-
-variable "region" {
-  description = "Set the region"
-  type = string
-  default = "us-east-1"
-}
+// (This file intentionally left as a placeholder.)

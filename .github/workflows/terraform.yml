@@ -1,0 +1,73 @@
+name: Terraform infra (ECR create + initial push)
+
+on:
+  push:
+    branches: [ "master" ]
+    paths:
+      - 'terraform/**'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: eu-central-1
+  ENV: dev
+
+jobs:
+  infra:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Diagnostics - show credential contexts and runtime env
+        run: |
+          echo "context: secrets.AWS_ACCESS_KEY_ID present? -> "$( [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ] && echo yes || echo no )
+          echo "context: secrets.AWS_SECRET_ACCESS_KEY present? -> "$( [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ] && echo yes || echo no )
+          echo "context: vars.AWS_ACCESS_KEY_ID present? -> "$( [ -n "${{ vars.AWS_ACCESS_KEY_ID }}" ] && echo yes || echo no )
+          echo "context: vars.AWS_SECRET_ACCESS_KEY present? -> "$( [ -n "${{ vars.AWS_SECRET_ACCESS_KEY }}" ] && echo yes || echo no )
+          echo "runtime: AWS_ACCESS_KEY_ID env var set? -> "$( [ -n "$AWS_ACCESS_KEY_ID" ] && echo yes || echo no )
+          echo "runtime: AWS_SECRET_ACCESS_KEY env var set? -> "$( [ -n "$AWS_SECRET_ACCESS_KEY" ] && echo yes || echo no )
+
+      - name: Check required AWS credentials (secrets or variables)
+        run: |
+          # The workflow accepts credentials from repository secrets or repository variables.
+          if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
+            echo "Found AWS credentials in repository secrets.";
+          elif [ -n "${{ vars.AWS_ACCESS_KEY_ID }}" ] && [ -n "${{ vars.AWS_SECRET_ACCESS_KEY }}" ]; then
+            echo "Found AWS credentials in repository variables (vars).";
+          else
+            echo "::error::Required AWS credentials are missing. Define them as repository secrets (recommended) or repository variables named AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.";
+            exit 1;
+          fi
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID || vars.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY || vars.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Validate AWS credentials (sts:GetCallerIdentity)
+        run: |
+          set -e
+          if ! aws sts get-caller-identity --output json >/tmp/aws-caller.json 2>/tmp/aws-caller.err; then
+            echo "::error::AWS credentials are present but could not be validated (sts:GetCallerIdentity failed).";
+            echo "Check that the provided credentials are correct and have sts:GetCallerIdentity permission.";
+            echo "aws sts output:";
+            sed -n '1,200p' /tmp/aws-caller.err || true
+            exit 1;
+          else
+            echo "AWS credentials validated. Caller identity:";
+            jq -r '.Account + " / " + .Arn' /tmp/aws-caller.json || cat /tmp/aws-caller.json
+          fi
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform init
+        working-directory: ./terraform
+        run: terraform init
+
+      - name: Terraform apply
+        working-directory: ./terraform
+        run: terraform apply -var-file="dev.tfvars" -auto-approve

@@ -1,10 +1,4 @@
-variable "cidr_block" {
-  description = "The CIDR block for the subnet"
-  type        = string
+// Archived: original subnet/variables.tf moved to terraform/archive/subnet_variables.tf
+// See terraform/archive/ for the original variables.
 
-}
-
-variable "vpc_id" {
-  description = "The ID of the VPC where the subnet will be created"
-  type        = string
-}
+// (This file intentionally left as a placeholder.)

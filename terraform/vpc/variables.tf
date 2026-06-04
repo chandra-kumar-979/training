@@ -1,4 +1,5 @@
-variable cidr_block {
-  description = "The CIDR block for the VPC"
-  type        = string
-}
+// Archived: original vpc/variables.tf moved to terraform/archive/vpc_variables.tf
+// See terraform/archive/ for original module variables.
+
+// (This file intentionally left as a placeholder.)
+
