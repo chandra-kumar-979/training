@@ -1,5 +1,9 @@
+# =============================================
+# FIX: Add explicit depends_on to break cycle
+# =============================================
 data "tls_certificate" "eks" {
-  url        = module.eks.cluster_oidc_issuer_url
+  url = module.eks.cluster_oidc_issuer_url
+
   depends_on = [module.eks]
 }
 
@@ -7,9 +11,11 @@ resource "aws_iam_openid_connect_provider" "eks" {
   client_id_list  = ["sts.amazonaws.com"]
   thumbprint_list = [data.tls_certificate.eks.certificates[0].sha1_fingerprint]
   url             = module.eks.cluster_oidc_issuer_url
+
+  depends_on = [module.eks]
 }
 
-# EBS CSI Driver
+# EBS CSI Driver IAM Role
 resource "aws_iam_role" "ebs_csi_driver" {
   name = "${var.project_name}-${var.environment}-ebs-csi"
 
@@ -29,6 +35,8 @@ resource "aws_iam_role" "ebs_csi_driver" {
       }
     }]
   })
+
+  depends_on = [aws_iam_openid_connect_provider.eks]
 }
 
 resource "aws_iam_role_policy_attachment" "ebs_csi_driver" {
@@ -36,7 +44,7 @@ resource "aws_iam_role_policy_attachment" "ebs_csi_driver" {
   role       = aws_iam_role.ebs_csi_driver.name
 }
 
-# Load Balancer Controller
+# Load Balancer Controller IAM Role
 resource "aws_iam_role" "lb_controller" {
   name = "${var.project_name}-${var.environment}-lb-ctrl"
 
@@ -56,6 +64,8 @@ resource "aws_iam_role" "lb_controller" {
       }
     }]
   })
+
+  depends_on = [aws_iam_openid_connect_provider.eks]
 }
 
 resource "aws_iam_policy" "lb_controller" {

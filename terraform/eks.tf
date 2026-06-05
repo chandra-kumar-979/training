@@ -13,14 +13,14 @@ module "eks" {
 
   enable_irsa = true
 
+  # =============================================
+  # FIX: Remove aws-ebs-csi-driver from here
+  # It is added SEPARATELY below after OIDC is created
+  # =============================================
   cluster_addons = {
-    coredns            = { most_recent = true }
-    kube-proxy         = { most_recent = true }
-    vpc-cni            = { most_recent = true }
-    aws-ebs-csi-driver = {
-      most_recent              = true
-      service_account_role_arn = aws_iam_role.ebs_csi_driver.arn
-    }
+    coredns    = { most_recent = true }
+    kube-proxy = { most_recent = true }
+    vpc-cni    = { most_recent = true }
   }
 
   eks_managed_node_groups = merge(
@@ -40,7 +40,7 @@ module "eks" {
         }
 
         tags = {
-          "k8s.io/cluster-autoscaler/enabled"                              = "true"
+          "k8s.io/cluster-autoscaler/enabled"                                = "true"
           "k8s.io/cluster-autoscaler/${var.project_name}-${var.environment}" = "owned"
         }
       }
@@ -72,6 +72,33 @@ module "eks" {
   )
 }
 
+# =============================================
+# FIX: Add EBS CSI Driver SEPARATELY
+# after OIDC provider is created
+# =============================================
+resource "aws_eks_addon" "ebs_csi_driver" {
+  cluster_name             = module.eks.cluster_name
+  addon_name               = "aws-ebs-csi-driver"
+  addon_version            = data.aws_eks_addon_version.ebs_csi.version
+  service_account_role_arn = aws_iam_role.ebs_csi_driver.arn
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+
+  depends_on = [
+    module.eks,
+    aws_iam_role.ebs_csi_driver,
+    aws_iam_openid_connect_provider.eks
+  ]
+}
+
+# Get latest EBS CSI driver version
+data "aws_eks_addon_version" "ebs_csi" {
+  addon_name         = "aws-ebs-csi-driver"
+  kubernetes_version = module.eks.cluster_version
+  most_recent        = true
+}
+
+# GP3 Storage Class
 resource "kubernetes_storage_class" "gp3" {
   metadata {
     name = "gp3"
@@ -90,5 +117,8 @@ resource "kubernetes_storage_class" "gp3" {
     encrypted = "true"
   }
 
-  depends_on = [module.eks]
+  depends_on = [
+    module.eks,
+    aws_eks_addon.ebs_csi_driver
+  ]
 }
