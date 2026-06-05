@@ -47,9 +47,6 @@ permissions:
   contents: read
 
 jobs:
-  # ============================================================
-  # JOB 1: Detect Changes (no secrets needed - no environment)
-  # ============================================================
   detect-changes:
     name: Detect Changes
     runs-on: ubuntu-latest
@@ -94,16 +91,10 @@ jobs:
           echo "  Deploy Models:      ${{ env.DEPLOY_OLLAMA_MODELS }}"
           echo "=========================================="
 
-  # ============================================================
-  # JOB 2: Terraform
-  # ============================================================
   terraform:
     name: Terraform Infrastructure
     runs-on: ubuntu-latest
     needs: detect-changes
-    # =============================================
-    # THIS IS THE KEY LINE - links to dev environment secrets
-    # =============================================
     environment: dev
     if: |
       needs.detect-changes.outputs.terraform_changed == 'true' ||
@@ -112,7 +103,6 @@ jobs:
       ecr_repository_url: ${{ steps.tf-output.outputs.ecr_repository_url }}
       eks_cluster_name: ${{ steps.tf-output.outputs.eks_cluster_name }}
       lb_controller_role_arn: ${{ steps.tf-output.outputs.lb_controller_role_arn }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -144,6 +134,87 @@ jobs:
         working-directory: terraform
         run: terraform validate
 
+      - name: Import Existing Resources
+        working-directory: terraform
+        run: |
+          echo ">>> Checking for existing resources to import..."
+
+          OIDC_URL=$(aws eks describe-cluster \
+            --name "${{ env.EKS_CLUSTER_NAME }}" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'cluster.identity.oidc.issuer' \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$OIDC_URL" ] && [ "$OIDC_URL" != "None" ]; then
+            OIDC_ID=$(echo $OIDC_URL | grep -oP 'id/\K.*')
+            ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            OIDC_ARN="arn:aws:iam::${ACCOUNT_ID}:oidc-provider/oidc.eks.${{ env.AWS_REGION }}.amazonaws.com/id/${OIDC_ID}"
+            echo "Found existing OIDC: ${OIDC_ARN}"
+            terraform import \
+              -var="aws_region=${{ env.AWS_REGION }}" \
+              -var="project_name=${{ env.PROJECT_NAME }}" \
+              -var="environment=${{ env.ENVIRONMENT }}" \
+              aws_iam_openid_connect_provider.eks "${OIDC_ARN}" 2>/dev/null || echo "Already in state"
+          else
+            echo "No existing OIDC provider found"
+          fi
+
+          ECR_EXISTS=$(aws ecr describe-repositories \
+            --repository-names "${{ env.PROJECT_NAME }}/${{ env.ENVIRONMENT }}/api" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'repositories[0].repositoryArn' \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$ECR_EXISTS" ] && [ "$ECR_EXISTS" != "None" ]; then
+            echo "Found existing ECR"
+            terraform import \
+              -var="aws_region=${{ env.AWS_REGION }}" \
+              -var="project_name=${{ env.PROJECT_NAME }}" \
+              -var="environment=${{ env.ENVIRONMENT }}" \
+              aws_ecr_repository.rag_api "${{ env.PROJECT_NAME }}/${{ env.ENVIRONMENT }}/api" 2>/dev/null || echo "Already in state"
+          fi
+
+          for ROLE_NAME in "${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}-ebs-csi" "${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}-lb-ctrl"; do
+            ROLE_EXISTS=$(aws iam get-role \
+              --role-name "$ROLE_NAME" \
+              --query 'Role.Arn' \
+              --output text 2>/dev/null || echo "")
+            if [ -n "$ROLE_EXISTS" ] && [ "$ROLE_EXISTS" != "None" ]; then
+              echo "Found existing IAM role: ${ROLE_NAME}"
+              if [[ "$ROLE_NAME" == *"ebs-csi"* ]]; then
+                terraform import \
+                  -var="aws_region=${{ env.AWS_REGION }}" \
+                  -var="project_name=${{ env.PROJECT_NAME }}" \
+                  -var="environment=${{ env.ENVIRONMENT }}" \
+                  aws_iam_role.ebs_csi_driver "$ROLE_NAME" 2>/dev/null || echo "Already in state"
+              elif [[ "$ROLE_NAME" == *"lb-ctrl"* ]]; then
+                terraform import \
+                  -var="aws_region=${{ env.AWS_REGION }}" \
+                  -var="project_name=${{ env.PROJECT_NAME }}" \
+                  -var="environment=${{ env.ENVIRONMENT }}" \
+                  aws_iam_role.lb_controller "$ROLE_NAME" 2>/dev/null || echo "Already in state"
+              fi
+            fi
+          done
+
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}-lb-ctrl"
+          POLICY_EXISTS=$(aws iam get-policy \
+            --policy-arn "$POLICY_ARN" \
+            --query 'Policy.Arn' \
+            --output text 2>/dev/null || echo "")
+          if [ -n "$POLICY_EXISTS" ] && [ "$POLICY_EXISTS" != "None" ]; then
+            echo "Found existing IAM policy"
+            terraform import \
+              -var="aws_region=${{ env.AWS_REGION }}" \
+              -var="project_name=${{ env.PROJECT_NAME }}" \
+              -var="environment=${{ env.ENVIRONMENT }}" \
+              aws_iam_policy.lb_controller "$POLICY_ARN" 2>/dev/null || echo "Already in state"
+          fi
+
+          echo ">>> Import check complete"
+        continue-on-error: true
+
       - name: Terraform Plan
         working-directory: terraform
         run: |
@@ -165,16 +236,11 @@ jobs:
           echo "eks_cluster_name=$(terraform output -raw eks_cluster_name)" >> $GITHUB_OUTPUT
           echo "lb_controller_role_arn=$(terraform output -raw lb_controller_role_arn)" >> $GITHUB_OUTPUT
 
-  # ============================================================
-  # JOB 3: Build & Push Docker Image
-  # ============================================================
   build-and-push:
     name: Build & Push Docker Image
     runs-on: ubuntu-latest
     needs: [detect-changes, terraform]
-    # =============================================
     environment: dev
-    # =============================================
     if: |
       always() &&
       !cancelled() &&
@@ -185,7 +251,6 @@ jobs:
     outputs:
       image_tag: ${{ steps.meta.outputs.image_tag }}
       full_image: ${{ steps.meta.outputs.full_image }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -208,11 +273,9 @@ jobs:
             --repository-names "${{ env.PROJECT_NAME }}/${{ env.ENVIRONMENT }}/api" \
             --query 'repositories[0].repositoryUri' \
             --output text 2>/dev/null || echo "")
-
           if [ -z "$ECR_URL" ] || [ "$ECR_URL" == "None" ]; then
             ECR_URL="${{ needs.terraform.outputs.ecr_repository_url }}"
           fi
-
           echo "ecr_url=${ECR_URL}" >> $GITHUB_OUTPUT
           echo "ECR URL: ${ECR_URL}"
 
@@ -233,7 +296,6 @@ jobs:
           TIMESTAMP=$(date +%Y%m%d%H%M%S)
           IMAGE_TAG="${SHORT_SHA}-${TIMESTAMP}"
           FULL_IMAGE="${{ steps.ecr-url.outputs.ecr_url }}:${IMAGE_TAG}"
-
           echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
           echo "full_image=${FULL_IMAGE}" >> $GITHUB_OUTPUT
           echo "Image: ${FULL_IMAGE}"
@@ -264,21 +326,15 @@ jobs:
           severity: 'CRITICAL,HIGH'
         continue-on-error: true
 
-  # ============================================================
-  # JOB 4: Setup EKS Cluster
-  # ============================================================
   setup-cluster:
     name: Setup EKS Cluster
     runs-on: ubuntu-latest
     needs: [terraform]
-    # =============================================
     environment: dev
-    # =============================================
     if: |
       always() &&
       !cancelled() &&
       needs.terraform.result == 'success'
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -293,23 +349,38 @@ jobs:
       - name: Setup kubectl
         uses: azure/setup-kubectl@v3
         with:
-          version: 'v1.29.0'
+          version: 'v1.28.0'
 
       - name: Setup Helm
         uses: azure/setup-helm@v3
         with:
           version: 'v3.14.0'
 
-      - name: Configure kubectl
+      - name: Configure and Verify kubectl
         run: |
           aws eks update-kubeconfig \
             --region ${{ env.AWS_REGION }} \
             --name ${{ env.EKS_CLUSTER_NAME }}
 
-      - name: Verify Cluster Connection
+          echo ">>> Verifying cluster access..."
+          for i in $(seq 1 10); do
+            if kubectl get nodes > /dev/null 2>&1; then
+              echo "✅ kubectl authenticated successfully"
+              kubectl get nodes -o wide
+              break
+            fi
+            echo "  Attempt $i/10 - waiting 15s..."
+            sleep 15
+            aws eks update-kubeconfig \
+              --region ${{ env.AWS_REGION }} \
+              --name ${{ env.EKS_CLUSTER_NAME }}
+          done
+
+      - name: Wait for Nodes Ready
         run: |
-          kubectl cluster-info
-          kubectl get nodes
+          echo ">>> Waiting for nodes to be Ready..."
+          kubectl wait --for=condition=Ready nodes --all --timeout=300s || true
+          kubectl get nodes -o wide
 
       - name: Install AWS Load Balancer Controller
         run: |
@@ -323,6 +394,9 @@ jobs:
             --output text)
 
           LB_ROLE_ARN="${{ needs.terraform.outputs.lb_controller_role_arn }}"
+
+          echo "VPC: ${VPC_ID}"
+          echo "Role: ${LB_ROLE_ARN}"
 
           helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
             -n kube-system \
@@ -343,18 +417,12 @@ jobs:
           kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.15.0/deployments/static/nvidia-device-plugin.yml || true
         continue-on-error: true
 
-  # ============================================================
-  # JOB 5: Deploy to Kubernetes
-  # ============================================================
   deploy:
     name: Deploy to EKS
     runs-on: ubuntu-latest
     needs: [detect-changes, terraform, build-and-push, setup-cluster]
-    # =============================================
     environment: dev
-    # =============================================
     if: always() && !cancelled() && !failure()
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -369,13 +437,27 @@ jobs:
       - name: Setup kubectl
         uses: azure/setup-kubectl@v3
         with:
-          version: 'v1.29.0'
+          version: 'v1.28.0'
 
-      - name: Configure kubectl
+      - name: Configure and Verify kubectl
         run: |
           aws eks update-kubeconfig \
             --region ${{ env.AWS_REGION }} \
             --name ${{ env.EKS_CLUSTER_NAME }}
+
+          echo ">>> Verifying cluster access..."
+          for i in $(seq 1 10); do
+            if kubectl get nodes > /dev/null 2>&1; then
+              echo "✅ kubectl authenticated"
+              kubectl get nodes
+              break
+            fi
+            echo "  Attempt $i/10 - waiting 15s..."
+            sleep 15
+            aws eks update-kubeconfig \
+              --region ${{ env.AWS_REGION }} \
+              --name ${{ env.EKS_CLUSTER_NAME }}
+          done
 
       - name: Get ECR Repository URL
         id: ecr-url
@@ -402,14 +484,13 @@ jobs:
       - name: Replace Image in manifest.yml
         run: |
           sed -i "s|image: .*api:.*|image: ${{ steps.image.outputs.full_image }}|g" manifest.yml
-          echo "=== Verify image replacement ==="
+          echo "=== Verify ==="
           grep "image:" manifest.yml
 
-      - name: Patch Ollama for Model Pull (if enabled)
+      - name: Patch Ollama for Model Pull
         if: env.DEPLOY_OLLAMA_MODELS == 'true'
         run: |
-          echo "✅ Ollama model pull ENABLED - injecting initContainers"
-
+          echo "✅ Ollama model pull ENABLED"
           python3 << 'EOF'
           import yaml
 
@@ -438,7 +519,7 @@ jobs:
                           'limits': {'cpu': '4', 'memory': '8Gi'}
                       }
                   }]
-                  print("initContainers injected into Ollama deployment")
+                  print("initContainers injected")
                   break
 
           with open('manifest.yml', 'w') as f:
@@ -449,7 +530,6 @@ jobs:
         if: env.DEPLOY_OLLAMA_MODELS != 'true'
         run: |
           echo "⏭️  Ollama models SKIPPED"
-          echo "   Run 'Ollama Models Management' workflow to pull models later"
 
       - name: Apply manifest.yml
         run: |
@@ -467,7 +547,7 @@ jobs:
       - name: Wait for Ollama
         run: |
           if [ "${{ env.DEPLOY_OLLAMA_MODELS }}" == "true" ]; then
-            echo "⏳ Waiting for Ollama (with model download)..."
+            echo "⏳ Waiting for Ollama (with models)..."
             kubectl rollout status deployment/ollama -n rag-api --timeout=1800s
           else
             echo "⏳ Waiting for Ollama (server only)..."
@@ -506,25 +586,24 @@ jobs:
       - name: Get Application URL
         id: app-url
         run: |
-          echo "Waiting for ALB provisioning..."
+          echo "Waiting for ALB..."
           for i in $(seq 1 30); do
             ALB_URL=$(kubectl get ingress rag-api-ingress -n rag-api \
               -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
             if [ -n "$ALB_URL" ] && [ "$ALB_URL" != "" ]; then
               echo ""
               echo "=========================================="
-              echo "  🚀 Application URL: http://${ALB_URL}"
-              echo "  📖 Swagger UI:      http://${ALB_URL}/swagger-ui.html"
-              echo "  ❤️  Health Check:    http://${ALB_URL}/actuator/health"
-              echo "  📄 API Docs:        http://${ALB_URL}/v3/api-docs"
+              echo "  🚀 App URL:    http://${ALB_URL}"
+              echo "  📖 Swagger:    http://${ALB_URL}/swagger-ui.html"
+              echo "  ❤️  Health:     http://${ALB_URL}/actuator/health"
+              echo "  📄 API Docs:   http://${ALB_URL}/v3/api-docs"
               echo "=========================================="
               echo "app_url=http://${ALB_URL}" >> $GITHUB_OUTPUT
               break
             fi
-            echo "  Attempt $i/30 - ALB not ready, waiting 10s..."
+            echo "  Attempt $i/30 - waiting 10s..."
             sleep 10
           done
-
           if [ -z "$ALB_URL" ] || [ "$ALB_URL" == "" ]; then
             echo "⚠️  ALB not available yet"
             kubectl describe ingress rag-api-ingress -n rag-api || true
@@ -535,11 +614,9 @@ jobs:
         run: |
           sleep 30
           APP_URL="${{ steps.app-url.outputs.app_url }}"
-
           for i in $(seq 1 10); do
             HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
               "${APP_URL}/actuator/health" --connect-timeout 5 || echo "000")
-
             if [ "$HTTP_CODE" == "200" ]; then
               echo "✅ Health check PASSED (HTTP ${HTTP_CODE})"
               curl -s "${APP_URL}/actuator/health" | python3 -m json.tool 2>/dev/null || true
@@ -556,7 +633,7 @@ jobs:
           echo ""
           echo "=========================================="
           if [ "${{ env.DEPLOY_OLLAMA_MODELS }}" == "true" ]; then
-            echo "  ✅ Ollama models were deployed"
+            echo "  ✅ Ollama models deployed"
             OLLAMA_POD=$(kubectl get pods -n rag-api -l app=ollama \
               -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
             if [ -n "$OLLAMA_POD" ]; then
@@ -564,19 +641,15 @@ jobs:
             fi
           else
             echo "  ⏭️  Ollama models SKIPPED"
-            echo "  → Actions → 'Ollama Models Management' → Run workflow"
+            echo "  → Actions → Ollama Models Management → Run workflow"
           fi
           echo "=========================================="
 
-  # ============================================================
-  # JOB 6: Summary (no secrets needed - no environment)
-  # ============================================================
   summary:
     name: Deployment Summary
     runs-on: ubuntu-latest
     needs: [detect-changes, terraform, build-and-push, setup-cluster, deploy]
     if: always()
-
     steps:
       - name: Generate Summary
         run: |

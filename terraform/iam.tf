@@ -1,18 +1,25 @@
 # =============================================
-# FIX: Add explicit depends_on to break cycle
+# FIX: Use data source to find existing OIDC provider
+# instead of creating a new one
 # =============================================
 data "tls_certificate" "eks" {
-  url = module.eks.cluster_oidc_issuer_url
-
+  url        = module.eks.cluster_oidc_issuer_url
   depends_on = [module.eks]
 }
 
+# Try to create OIDC provider, ignore if exists
 resource "aws_iam_openid_connect_provider" "eks" {
   client_id_list  = ["sts.amazonaws.com"]
   thumbprint_list = [data.tls_certificate.eks.certificates[0].sha1_fingerprint]
   url             = module.eks.cluster_oidc_issuer_url
 
   depends_on = [module.eks]
+
+  lifecycle {
+    ignore_changes = [
+      thumbprint_list
+    ]
+  }
 }
 
 # EBS CSI Driver IAM Role

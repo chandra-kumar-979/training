@@ -1,4 +1,19 @@
 ---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  type: gp3
+  fsType: ext4
+  encrypted: "true"
+
+---
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -41,9 +56,6 @@ stringData:
   QDRANT_API_KEY: ""
 
 ---
-# ==========================================
-# QDRANT - Persistent Volume Claim
-# ==========================================
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -60,9 +72,6 @@ spec:
       storage: 20Gi
 
 ---
-# ==========================================
-# QDRANT - Deployment
-# ==========================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -122,9 +131,6 @@ spec:
             claimName: qdrant-data-pvc
 
 ---
-# ==========================================
-# QDRANT - Service
-# ==========================================
 apiVersion: v1
 kind: Service
 metadata:
@@ -145,9 +151,6 @@ spec:
       targetPort: 6334
 
 ---
-# ==========================================
-# OLLAMA - Persistent Volume Claim
-# ==========================================
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -164,10 +167,6 @@ spec:
       storage: 50Gi
 
 ---
-# ==========================================
-# OLLAMA - Deployment (NO models by default)
-# Models are pulled via separate workflow
-# ==========================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -229,9 +228,6 @@ spec:
             claimName: ollama-data-pvc
 
 ---
-# ==========================================
-# OLLAMA - Service
-# ==========================================
 apiVersion: v1
 kind: Service
 metadata:
@@ -249,9 +245,6 @@ spec:
       targetPort: 11434
 
 ---
-# ==========================================
-# RAG API - Service Account
-# ==========================================
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -261,9 +254,6 @@ metadata:
     app: rag-api
 
 ---
-# ==========================================
-# RAG API - Deployment
-# ==========================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -299,7 +289,6 @@ spec:
         fsGroup: 1000
       containers:
         - name: rag-api
-          # IMAGE_PLACEHOLDER - replaced by GitHub Actions pipeline
           image: ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/rag-api/dev/api:latest
           imagePullPolicy: Always
           ports:
@@ -347,9 +336,6 @@ spec:
       terminationGracePeriodSeconds: 30
 
 ---
-# ==========================================
-# RAG API - Service
-# ==========================================
 apiVersion: v1
 kind: Service
 metadata:
@@ -367,9 +353,6 @@ spec:
       targetPort: 8080
 
 ---
-# ==========================================
-# INGRESS - AWS ALB
-# ==========================================
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -398,9 +381,6 @@ spec:
                   number: 80
 
 ---
-# ==========================================
-# HPA - Horizontal Pod Autoscaler
-# ==========================================
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -441,9 +421,6 @@ spec:
           periodSeconds: 60
 
 ---
-# ==========================================
-# NETWORK POLICY
-# ==========================================
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
