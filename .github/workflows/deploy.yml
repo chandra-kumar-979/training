@@ -1,0 +1,599 @@
+name: Deploy RAG API to AWS EKS
+
+on:
+  push:
+    branches:
+      - master
+      - main
+
+  workflow_dispatch:
+    inputs:
+      deploy_ollama_models:
+        description: 'Pull Ollama models (LLM + Embedding)?'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      skip_terraform:
+        description: 'Skip Terraform?'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      skip_docker_build:
+        description: 'Skip Docker build & push?'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+env:
+  AWS_REGION: us-east-1
+  PROJECT_NAME: rag-api
+  ENVIRONMENT: dev
+  EKS_CLUSTER_NAME: rag-api-dev
+  TERRAFORM_VERSION: "1.7.5"
+  JAVA_VERSION: "21"
+  DEPLOY_OLLAMA_MODELS: ${{ github.event.inputs.deploy_ollama_models || 'false' }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # ============================================================
+  # JOB 1: Detect Changes (no secrets needed - no environment)
+  # ============================================================
+  detect-changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      terraform_changed: ${{ steps.changes.outputs.terraform }}
+      app_changed: ${{ steps.changes.outputs.app }}
+      manifest_changed: ${{ steps.changes.outputs.manifest }}
+      docker_changed: ${{ steps.changes.outputs.docker }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect file changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            terraform:
+              - 'terraform/**'
+            app:
+              - 'src/**'
+              - 'pom.xml'
+            manifest:
+              - 'manifest.yml'
+            docker:
+              - 'Dockerfile'
+              - '.dockerignore'
+              - 'src/**'
+              - 'pom.xml'
+
+      - name: Print detected changes
+        run: |
+          echo "=========================================="
+          echo "  Change Detection Results"
+          echo "=========================================="
+          echo "  Terraform changed:  ${{ steps.changes.outputs.terraform }}"
+          echo "  App changed:        ${{ steps.changes.outputs.app }}"
+          echo "  Manifest changed:   ${{ steps.changes.outputs.manifest }}"
+          echo "  Docker changed:     ${{ steps.changes.outputs.docker }}"
+          echo "  Deploy Models:      ${{ env.DEPLOY_OLLAMA_MODELS }}"
+          echo "=========================================="
+
+  # ============================================================
+  # JOB 2: Terraform
+  # ============================================================
+  terraform:
+    name: Terraform Infrastructure
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    # =============================================
+    # THIS IS THE KEY LINE - links to dev environment secrets
+    # =============================================
+    environment: dev
+    if: |
+      needs.detect-changes.outputs.terraform_changed == 'true' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.skip_terraform != 'true')
+    outputs:
+      ecr_repository_url: ${{ steps.tf-output.outputs.ecr_repository_url }}
+      eks_cluster_name: ${{ steps.tf-output.outputs.eks_cluster_name }}
+      lb_controller_role_arn: ${{ steps.tf-output.outputs.lb_controller_role_arn }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ env.PROJECT_NAME }}/${{ env.ENVIRONMENT }}/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform Validate
+        working-directory: terraform
+        run: terraform validate
+
+      - name: Terraform Plan
+        working-directory: terraform
+        run: |
+          terraform plan \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="project_name=${{ env.PROJECT_NAME }}" \
+            -var="environment=${{ env.ENVIRONMENT }}" \
+            -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: terraform
+        run: terraform apply -auto-approve tfplan
+
+      - name: Get Terraform Outputs
+        id: tf-output
+        working-directory: terraform
+        run: |
+          echo "ecr_repository_url=$(terraform output -raw ecr_repository_url)" >> $GITHUB_OUTPUT
+          echo "eks_cluster_name=$(terraform output -raw eks_cluster_name)" >> $GITHUB_OUTPUT
+          echo "lb_controller_role_arn=$(terraform output -raw lb_controller_role_arn)" >> $GITHUB_OUTPUT
+
+  # ============================================================
+  # JOB 3: Build & Push Docker Image
+  # ============================================================
+  build-and-push:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [detect-changes, terraform]
+    # =============================================
+    environment: dev
+    # =============================================
+    if: |
+      always() &&
+      !cancelled() &&
+      (needs.terraform.result == 'success' || needs.terraform.result == 'skipped') &&
+      (needs.detect-changes.outputs.docker_changed == 'true' ||
+       needs.detect-changes.outputs.app_changed == 'true') &&
+      github.event.inputs.skip_docker_build != 'true'
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      full_image: ${{ steps.meta.outputs.full_image }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Get ECR Repository URL
+        id: ecr-url
+        run: |
+          ECR_URL=$(aws ecr describe-repositories \
+            --repository-names "${{ env.PROJECT_NAME }}/${{ env.ENVIRONMENT }}/api" \
+            --query 'repositories[0].repositoryUri' \
+            --output text 2>/dev/null || echo "")
+
+          if [ -z "$ECR_URL" ] || [ "$ECR_URL" == "None" ]; then
+            ECR_URL="${{ needs.terraform.outputs.ecr_repository_url }}"
+          fi
+
+          echo "ecr_url=${ECR_URL}" >> $GITHUB_OUTPUT
+          echo "ECR URL: ${ECR_URL}"
+
+      - name: Set up Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: 'maven'
+
+      - name: Run Tests
+        run: mvn test -B
+
+      - name: Generate Image Metadata
+        id: meta
+        run: |
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          IMAGE_TAG="${SHORT_SHA}-${TIMESTAMP}"
+          FULL_IMAGE="${{ steps.ecr-url.outputs.ecr_url }}:${IMAGE_TAG}"
+
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "full_image=${FULL_IMAGE}" >> $GITHUB_OUTPUT
+          echo "Image: ${FULL_IMAGE}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ steps.ecr-url.outputs.ecr_url }}:${{ steps.meta.outputs.image_tag }}
+            ${{ steps.ecr-url.outputs.ecr_url }}:latest
+            ${{ steps.ecr-url.outputs.ecr_url }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan Image for Vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "${{ steps.ecr-url.outputs.ecr_url }}:${{ steps.meta.outputs.image_tag }}"
+          format: 'table'
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+        continue-on-error: true
+
+  # ============================================================
+  # JOB 4: Setup EKS Cluster
+  # ============================================================
+  setup-cluster:
+    name: Setup EKS Cluster
+    runs-on: ubuntu-latest
+    needs: [terraform]
+    # =============================================
+    environment: dev
+    # =============================================
+    if: |
+      always() &&
+      !cancelled() &&
+      needs.terraform.result == 'success'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.29.0'
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.14.0'
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Verify Cluster Connection
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Install AWS Load Balancer Controller
+        run: |
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update
+
+          VPC_ID=$(aws eks describe-cluster \
+            --name ${{ env.EKS_CLUSTER_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "cluster.resourcesVpcConfig.vpcId" \
+            --output text)
+
+          LB_ROLE_ARN="${{ needs.terraform.outputs.lb_controller_role_arn }}"
+
+          helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+            -n kube-system \
+            --set clusterName=${{ env.EKS_CLUSTER_NAME }} \
+            --set serviceAccount.create=true \
+            --set serviceAccount.name=aws-load-balancer-controller \
+            --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=${LB_ROLE_ARN}" \
+            --set region=${{ env.AWS_REGION }} \
+            --set vpcId="${VPC_ID}" \
+            --wait --timeout 300s
+
+      - name: Install Metrics Server
+        run: |
+          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml || true
+
+      - name: Install NVIDIA Device Plugin
+        run: |
+          kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.15.0/deployments/static/nvidia-device-plugin.yml || true
+        continue-on-error: true
+
+  # ============================================================
+  # JOB 5: Deploy to Kubernetes
+  # ============================================================
+  deploy:
+    name: Deploy to EKS
+    runs-on: ubuntu-latest
+    needs: [detect-changes, terraform, build-and-push, setup-cluster]
+    # =============================================
+    environment: dev
+    # =============================================
+    if: always() && !cancelled() && !failure()
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.29.0'
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Get ECR Repository URL
+        id: ecr-url
+        run: |
+          ECR_URL=$(aws ecr describe-repositories \
+            --repository-names "${{ env.PROJECT_NAME }}/${{ env.ENVIRONMENT }}/api" \
+            --query 'repositories[0].repositoryUri' \
+            --output text)
+          echo "ecr_url=${ECR_URL}" >> $GITHUB_OUTPUT
+
+      - name: Determine Image Tag
+        id: image
+        run: |
+          if [ -n "${{ needs.build-and-push.outputs.image_tag }}" ]; then
+            IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+          else
+            IMAGE_TAG="latest"
+          fi
+          FULL_IMAGE="${{ steps.ecr-url.outputs.ecr_url }}:${IMAGE_TAG}"
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "full_image=${FULL_IMAGE}" >> $GITHUB_OUTPUT
+          echo "Using image: ${FULL_IMAGE}"
+
+      - name: Replace Image in manifest.yml
+        run: |
+          sed -i "s|image: .*api:.*|image: ${{ steps.image.outputs.full_image }}|g" manifest.yml
+          echo "=== Verify image replacement ==="
+          grep "image:" manifest.yml
+
+      - name: Patch Ollama for Model Pull (if enabled)
+        if: env.DEPLOY_OLLAMA_MODELS == 'true'
+        run: |
+          echo "✅ Ollama model pull ENABLED - injecting initContainers"
+
+          python3 << 'EOF'
+          import yaml
+
+          with open('manifest.yml', 'r') as f:
+              docs = list(yaml.safe_load_all(f))
+
+          for doc in docs:
+              if doc and doc.get('kind') == 'Deployment' and doc['metadata'].get('name') == 'ollama':
+                  spec = doc['spec']['template']['spec']
+                  spec['initContainers'] = [{
+                      'name': 'model-puller',
+                      'image': 'ollama/ollama:latest',
+                      'command': ['/bin/sh', '-c'],
+                      'args': [
+                          'ollama serve & sleep 10 && '
+                          'ollama pull llama3.1:8b && '
+                          'ollama pull nomic-embed-text && '
+                          'echo "Models pulled successfully"'
+                      ],
+                      'volumeMounts': [{
+                          'name': 'ollama-data',
+                          'mountPath': '/root/.ollama'
+                      }],
+                      'resources': {
+                          'requests': {'cpu': '1', 'memory': '4Gi'},
+                          'limits': {'cpu': '4', 'memory': '8Gi'}
+                      }
+                  }]
+                  print("initContainers injected into Ollama deployment")
+                  break
+
+          with open('manifest.yml', 'w') as f:
+              yaml.dump_all(docs, f, default_flow_style=False)
+          EOF
+
+      - name: Skip Ollama Models Info
+        if: env.DEPLOY_OLLAMA_MODELS != 'true'
+        run: |
+          echo "⏭️  Ollama models SKIPPED"
+          echo "   Run 'Ollama Models Management' workflow to pull models later"
+
+      - name: Apply manifest.yml
+        run: |
+          echo "=========================================="
+          echo "  Applying manifest.yml to EKS"
+          echo "=========================================="
+          kubectl apply -f manifest.yml
+
+      - name: Wait for Qdrant
+        run: |
+          echo "⏳ Waiting for Qdrant..."
+          kubectl rollout status deployment/qdrant -n rag-api --timeout=300s
+          echo "✅ Qdrant is ready"
+
+      - name: Wait for Ollama
+        run: |
+          if [ "${{ env.DEPLOY_OLLAMA_MODELS }}" == "true" ]; then
+            echo "⏳ Waiting for Ollama (with model download)..."
+            kubectl rollout status deployment/ollama -n rag-api --timeout=1800s
+          else
+            echo "⏳ Waiting for Ollama (server only)..."
+            kubectl rollout status deployment/ollama -n rag-api --timeout=300s
+          fi
+          echo "✅ Ollama is ready"
+
+      - name: Wait for RAG API
+        run: |
+          echo "⏳ Waiting for RAG API..."
+          kubectl rollout status deployment/rag-api -n rag-api --timeout=300s
+          echo "✅ RAG API is ready"
+
+      - name: Deployment Status
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "         DEPLOYMENT STATUS"
+          echo "=========================================="
+          echo ""
+          echo "--- Pods ---"
+          kubectl get pods -n rag-api -o wide
+          echo ""
+          echo "--- Services ---"
+          kubectl get svc -n rag-api
+          echo ""
+          echo "--- Ingress ---"
+          kubectl get ingress -n rag-api
+          echo ""
+          echo "--- HPA ---"
+          kubectl get hpa -n rag-api
+          echo ""
+          echo "--- PVCs ---"
+          kubectl get pvc -n rag-api
+
+      - name: Get Application URL
+        id: app-url
+        run: |
+          echo "Waiting for ALB provisioning..."
+          for i in $(seq 1 30); do
+            ALB_URL=$(kubectl get ingress rag-api-ingress -n rag-api \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+            if [ -n "$ALB_URL" ] && [ "$ALB_URL" != "" ]; then
+              echo ""
+              echo "=========================================="
+              echo "  🚀 Application URL: http://${ALB_URL}"
+              echo "  📖 Swagger UI:      http://${ALB_URL}/swagger-ui.html"
+              echo "  ❤️  Health Check:    http://${ALB_URL}/actuator/health"
+              echo "  📄 API Docs:        http://${ALB_URL}/v3/api-docs"
+              echo "=========================================="
+              echo "app_url=http://${ALB_URL}" >> $GITHUB_OUTPUT
+              break
+            fi
+            echo "  Attempt $i/30 - ALB not ready, waiting 10s..."
+            sleep 10
+          done
+
+          if [ -z "$ALB_URL" ] || [ "$ALB_URL" == "" ]; then
+            echo "⚠️  ALB not available yet"
+            kubectl describe ingress rag-api-ingress -n rag-api || true
+          fi
+
+      - name: Health Check
+        if: steps.app-url.outputs.app_url != ''
+        run: |
+          sleep 30
+          APP_URL="${{ steps.app-url.outputs.app_url }}"
+
+          for i in $(seq 1 10); do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              "${APP_URL}/actuator/health" --connect-timeout 5 || echo "000")
+
+            if [ "$HTTP_CODE" == "200" ]; then
+              echo "✅ Health check PASSED (HTTP ${HTTP_CODE})"
+              curl -s "${APP_URL}/actuator/health" | python3 -m json.tool 2>/dev/null || true
+              exit 0
+            fi
+            echo "  Attempt $i/10 - HTTP ${HTTP_CODE}, waiting 15s..."
+            sleep 15
+          done
+          echo "⚠️  Health check timeout"
+        continue-on-error: true
+
+      - name: Ollama Model Status
+        run: |
+          echo ""
+          echo "=========================================="
+          if [ "${{ env.DEPLOY_OLLAMA_MODELS }}" == "true" ]; then
+            echo "  ✅ Ollama models were deployed"
+            OLLAMA_POD=$(kubectl get pods -n rag-api -l app=ollama \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+            if [ -n "$OLLAMA_POD" ]; then
+              kubectl exec -n rag-api "${OLLAMA_POD}" -- ollama list 2>/dev/null || true
+            fi
+          else
+            echo "  ⏭️  Ollama models SKIPPED"
+            echo "  → Actions → 'Ollama Models Management' → Run workflow"
+          fi
+          echo "=========================================="
+
+  # ============================================================
+  # JOB 6: Summary (no secrets needed - no environment)
+  # ============================================================
+  summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [detect-changes, terraform, build-and-push, setup-cluster, deploy]
+    if: always()
+
+    steps:
+      - name: Generate Summary
+        run: |
+          echo "## 🚀 RAG API Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Step | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Change Detection | ${{ needs.detect-changes.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Terraform | ${{ needs.terraform.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Docker Build | ${{ needs.build-and-push.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cluster Setup | ${{ needs.setup-cluster.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| K8s Deploy | ${{ needs.deploy.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** \`dev\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Cluster:** \`${{ env.EKS_CLUSTER_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Region:** \`${{ env.AWS_REGION }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image Tag:** \`${{ needs.build-and-push.outputs.image_tag || 'latest' }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Ollama Models:** \`${{ env.DEPLOY_OLLAMA_MODELS }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY

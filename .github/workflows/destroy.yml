@@ -1,0 +1,108 @@
+name: Destroy Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_destroy:
+        description: 'Type "DESTROY" to confirm'
+        required: true
+      destroy_scope:
+        description: 'What to destroy'
+        required: true
+        default: 'k8s-only'
+        type: choice
+        options:
+          - k8s-only
+          - all-including-infra
+
+env:
+  AWS_REGION: us-east-1
+  PROJECT_NAME: rag-api
+  ENVIRONMENT: dev
+  EKS_CLUSTER_NAME: rag-api-dev
+  TERRAFORM_VERSION: "1.7.5"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  destroy:
+    name: Destroy Resources
+    runs-on: ubuntu-latest
+    # =============================================
+    environment: dev
+    # =============================================
+    if: github.event.inputs.confirm_destroy == 'DESTROY'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.29.0'
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }} || true
+
+      - name: Delete Kubernetes Resources
+        run: |
+          echo "Deleting ingress first (ALB cleanup)..."
+          kubectl delete ingress --all -n rag-api --ignore-not-found=true || true
+          echo "Waiting 60s for ALB cleanup..."
+          sleep 60
+
+          echo "Deleting all K8s resources..."
+          kubectl delete -f manifest.yml --ignore-not-found=true || true
+
+          echo "Deleting namespace..."
+          kubectl delete namespace rag-api --ignore-not-found=true || true
+
+          echo "✅ Kubernetes resources deleted"
+
+      - name: Setup Terraform
+        if: inputs.destroy_scope == 'all-including-infra'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Destroy Terraform Infrastructure
+        if: inputs.destroy_scope == 'all-including-infra'
+        run: |
+          cd terraform
+
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ env.PROJECT_NAME }}/${{ env.ENVIRONMENT }}/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+
+          terraform destroy -auto-approve \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="project_name=${{ env.PROJECT_NAME }}" \
+            -var="environment=${{ env.ENVIRONMENT }}"
+
+          echo "✅ Terraform infrastructure destroyed"
+
+      - name: Summary
+        run: |
+          echo "## 🗑️ Destroy Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| K8s Resources | Deleted |" >> $GITHUB_STEP_SUMMARY
+          echo "| Terraform | ${{ inputs.destroy_scope == 'all-including-infra' && 'Destroyed' || 'Skipped' }} |" >> $GITHUB_STEP_SUMMARY

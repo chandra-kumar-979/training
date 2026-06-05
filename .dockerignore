@@ -1,0 +1,13 @@
+.git
+.gitignore
+.github
+README.md
+terraform/
+scripts/
+*.md
+.idea/
+.vscode/
+target/
+*.iml
+docker-compose.yml
+.env

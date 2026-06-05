@@ -1,14 +1,48 @@
-resource "aws_ecr_repository" "app" {
-  name                 = "rag-chatbot-app"
-  image_tag_mutability = "MUTABLE"
+terraform {
+  required_version = ">= 1.5.0"
 
-  tags = {
-    Environment = var.environment
-    ManagedBy   = "terraform"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.40"
+    }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.27"
+    }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
   }
 }
 
-output "ecr_repository_url" {
-  description = "The URI of the ECR repository"
-  value       = aws_ecr_repository.app.repository_url
+provider "aws" {
+  region = var.aws_region
+
+  default_tags {
+    tags = merge(var.tags, {
+      Project     = var.project_name
+      Environment = var.environment
+      ManagedBy   = "terraform"
+    })
+  }
+}
+
+data "aws_caller_identity" "current" {}
+
+data "aws_eks_cluster" "cluster" {
+  name       = module.eks.cluster_name
+  depends_on = [module.eks]
+}
+
+data "aws_eks_cluster_auth" "cluster" {
+  name       = module.eks.cluster_name
+  depends_on = [module.eks]
+}
+
+provider "kubernetes" {
+  host                   = data.aws_eks_cluster.cluster.endpoint
+  cluster_ca_certificate = base64decode(data.aws_eks_cluster.cluster.certificate_authority[0].data)
+  token                  = data.aws_eks_cluster_auth.cluster.token
 }

@@ -1,0 +1,159 @@
+name: Ollama Models Management
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'pull'
+        type: choice
+        options:
+          - pull
+          - list
+          - delete
+      llm_model:
+        description: 'LLM Model (e.g. llama3.1:8b, mistral:7b)'
+        required: false
+        default: 'llama3.1:8b'
+      embedding_model:
+        description: 'Embedding Model (e.g. nomic-embed-text)'
+        required: false
+        default: 'nomic-embed-text'
+      pull_llm:
+        description: 'Pull LLM model?'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      pull_embedding:
+        description: 'Pull Embedding model?'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: rag-api-dev
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  manage-models:
+    name: Manage Ollama Models
+    runs-on: ubuntu-latest
+    # =============================================
+    environment: dev
+    # =============================================
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.29.0'
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Wait for Ollama Pod
+        run: |
+          echo "=== Ollama Pod Status ==="
+          kubectl get pods -n rag-api -l app=ollama -o wide
+          kubectl wait --for=condition=ready pod -l app=ollama -n rag-api --timeout=120s
+
+      - name: Get Ollama Pod Name
+        id: pod
+        run: |
+          POD=$(kubectl get pods -n rag-api -l app=ollama \
+            -o jsonpath='{.items[0].metadata.name}')
+          echo "name=${POD}" >> $GITHUB_OUTPUT
+          echo "Ollama pod: ${POD}"
+
+      - name: List Current Models
+        if: inputs.action == 'list' || inputs.action == 'pull'
+        run: |
+          echo "=== Currently Installed Models ==="
+          kubectl exec -n rag-api ${{ steps.pod.outputs.name }} -- ollama list 2>/dev/null || echo "No models found"
+          echo ""
+          echo "=== Disk Usage ==="
+          kubectl exec -n rag-api ${{ steps.pod.outputs.name }} -- du -sh /root/.ollama/ 2>/dev/null || true
+
+      - name: Pull LLM Model
+        if: inputs.action == 'pull' && inputs.pull_llm == 'true'
+        run: |
+          MODEL="${{ inputs.llm_model }}"
+          echo "=========================================="
+          echo "  Pulling LLM: ${MODEL}"
+          echo "  This may take 10-30 minutes..."
+          echo "=========================================="
+          kubectl exec -n rag-api ${{ steps.pod.outputs.name }} -- ollama pull "${MODEL}"
+          echo "✅ LLM '${MODEL}' pulled successfully"
+
+      - name: Pull Embedding Model
+        if: inputs.action == 'pull' && inputs.pull_embedding == 'true'
+        run: |
+          MODEL="${{ inputs.embedding_model }}"
+          echo "=========================================="
+          echo "  Pulling Embedding: ${MODEL}"
+          echo "  This may take 5-15 minutes..."
+          echo "=========================================="
+          kubectl exec -n rag-api ${{ steps.pod.outputs.name }} -- ollama pull "${MODEL}"
+          echo "✅ Embedding '${MODEL}' pulled successfully"
+
+      - name: Delete Models
+        if: inputs.action == 'delete'
+        run: |
+          if [ "${{ inputs.pull_llm }}" == "true" ] && [ -n "${{ inputs.llm_model }}" ]; then
+            echo "Deleting: ${{ inputs.llm_model }}"
+            kubectl exec -n rag-api ${{ steps.pod.outputs.name }} -- \
+              ollama rm "${{ inputs.llm_model }}" || true
+          fi
+          if [ "${{ inputs.pull_embedding }}" == "true" ] && [ -n "${{ inputs.embedding_model }}" ]; then
+            echo "Deleting: ${{ inputs.embedding_model }}"
+            kubectl exec -n rag-api ${{ steps.pod.outputs.name }} -- \
+              ollama rm "${{ inputs.embedding_model }}" || true
+          fi
+
+      - name: Final Model List
+        run: |
+          echo ""
+          echo "=== Models After Action ==="
+          kubectl exec -n rag-api ${{ steps.pod.outputs.name }} -- ollama list 2>/dev/null || echo "No models"
+          echo ""
+          echo "=== Disk Usage ==="
+          kubectl exec -n rag-api ${{ steps.pod.outputs.name }} -- du -sh /root/.ollama/ 2>/dev/null || true
+
+      - name: Restart RAG API
+        if: inputs.action == 'pull'
+        run: |
+          echo "Restarting RAG API to detect new models..."
+          kubectl rollout restart deployment/rag-api -n rag-api
+          kubectl rollout status deployment/rag-api -n rag-api --timeout=180s
+          echo "✅ RAG API restarted"
+
+      - name: Summary
+        run: |
+          echo "## 🤖 Ollama Models" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Action | ${{ inputs.action }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| LLM | ${{ inputs.llm_model }} (pull=${{ inputs.pull_llm }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Embedding | ${{ inputs.embedding_model }} (pull=${{ inputs.pull_embedding }}) |" >> $GITHUB_STEP_SUMMARY

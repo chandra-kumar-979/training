@@ -1,0 +1,13 @@
+spring:
+  ai:
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://ollama-service:11434}
+    vectorstore:
+      qdrant:
+        host: ${QDRANT_HOST:qdrant-service}
+        port: ${QDRANT_GRPC_PORT:6334}
+
+logging:
+  level:
+    root: WARN
+    com.example.ragapi: INFO
